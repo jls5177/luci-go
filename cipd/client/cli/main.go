@@ -1772,6 +1772,57 @@ func (c *setTagRun) Run(a subcommands.Application, args []string, env subcommand
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+// 'remove-tag' subcommand.
+
+func cmdRemoveTag(params Parameters) *subcommands.Command {
+	return &subcommands.Command{
+		UsageLine: "remove-tag <package or package prefix> -tag=key:value [options]",
+		ShortDesc: "tags package of a specific version",
+		LongDesc:  "Tags package of a specific version",
+		CommandRun: func() subcommands.CommandRun {
+			c := &removeTagRun{}
+			c.registerBaseFlags()
+			c.tagsOptions.registerFlags(&c.Flags)
+			c.clientOptions.registerFlags(&c.Flags, params, withoutRootDir)
+			c.Flags.StringVar(&c.version, "version", "<version>",
+				"Package version to resolve. Could also be itself a tag or ref")
+			return c
+		},
+	}
+}
+
+type removeTagRun struct {
+	cipdSubcommand
+	tagsOptions
+	clientOptions
+
+	version string
+}
+
+func (c *removeTagRun) Run(a subcommands.Application, args []string, env subcommands.Env) int {
+	if !c.checkArgs(args, 1, 1) {
+		return 1
+	}
+	if len(c.tags) == 0 {
+		return c.done(nil, makeCLIError("at least one -tag must be provided"))
+	}
+	pkgPrefix, err := expandTemplate(args[0])
+	if err != nil {
+		return c.done(nil, err)
+	}
+
+	ctx := cli.GetContext(a, c, env)
+	return c.done(setRefOrTag(ctx, &setRefOrTagArgs{
+		clientOptions: c.clientOptions,
+		packagePrefix: pkgPrefix,
+		version:       c.version,
+		updatePin: func(client cipd.Client, pin common.Pin) error {
+			return client.DetachTags(ctx, pin, c.tags)
+		},
+	}))
+}
+
+////////////////////////////////////////////////////////////////////////////////
 // 'ls' subcommand.
 
 func cmdListPackages(params Parameters) *subcommands.Command {
@@ -2992,6 +3043,7 @@ func GetApplication(params Parameters) *cli.Application {
 			cmdCreate(params),
 			cmdSetRef(params),
 			cmdSetTag(params),
+			cmdRemoveTag(params),
 
 			// High level local write commands.
 			{},

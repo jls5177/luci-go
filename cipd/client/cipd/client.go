@@ -228,6 +228,9 @@ type Client interface {
 	// AttachTagsWhenReady attaches tags to an instance.
 	AttachTagsWhenReady(ctx context.Context, pin common.Pin, tags []string) error
 
+	// DetachTags attaches tags to an instance.
+	DetachTags(ctx context.Context, pin common.Pin, tags []string) error
+
 	// FetchPackageRefs returns information about all refs defined for a package.
 	//
 	// The returned list is sorted by modification timestamp (newest first).
@@ -1132,6 +1135,40 @@ func (client *clientImpl) AttachTagsWhenReady(ctx context.Context, pin common.Pi
 		logging.Errorf(ctx, "cipd: failed to attach tags - deadline exceeded")
 	default:
 		logging.Errorf(ctx, "cipd: failed to attach tags - %s", err)
+	}
+	return err
+}
+
+func (client *clientImpl) DetachTags(ctx context.Context, pin common.Pin, tags []string) error {
+	if err := common.ValidatePin(pin, common.AnyHash); err != nil {
+		return err
+	}
+	if len(tags) == 0 {
+		return nil
+	}
+
+	apiTags := make([]*api.Tag, len(tags))
+	for i, t := range tags {
+		var err error
+		if apiTags[i], err = common.ParseInstanceTag(t); err != nil {
+			return err
+		}
+		logging.Infof(ctx, "cipd: detaching tag %s", t)
+	}
+
+	_, err := client.repo.DetachTags(ctx, &api.DetachTagsRequest{
+		Package:  pin.PackageName,
+		Instance: common.InstanceIDToObjectRef(pin.InstanceID),
+		Tags:     apiTags,
+	}, expectedCodes)
+
+	switch err {
+	case nil:
+		logging.Infof(ctx, "cipd: all tags dettached")
+	case ErrProcessingTimeout:
+		logging.Errorf(ctx, "cipd: failed to detach tags - deadline exceeded")
+	default:
+		logging.Errorf(ctx, "cipd: failed to detach tags - %s", err)
 	}
 	return err
 }
