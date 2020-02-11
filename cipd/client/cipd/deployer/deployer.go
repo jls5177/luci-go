@@ -16,6 +16,7 @@ package deployer
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -38,6 +39,8 @@ import (
 	"go.chromium.org/luci/cipd/client/cipd/pkg"
 	"go.chromium.org/luci/cipd/client/cipd/reader"
 	"go.chromium.org/luci/cipd/common"
+
+	api "go.chromium.org/luci/cipd/api/cipd/v1"
 )
 
 // TODO(vadimsh): How to handle path conflicts between two packages? Currently
@@ -1310,6 +1313,47 @@ func (d *deployerImpl) isPresentInGuts(ctx context.Context, instDir string, f pk
 	}
 }
 
+// checkFileHash verifies the integrity of the given deployed file
+func (d *deployerImpl) checkFileHash(ctx context.Context, p *DeployedPackage, f pkg.FileInfo) (bool, error) {
+	absPath, err := d.fs.RootRelToAbs(filepath.Join(p.Subdir, filepath.FromSlash(f.Name)))
+	if err != nil {
+		return false, err
+	}
+	r, err := os.Open(absPath)
+	if err != nil {
+		return false, err
+	}
+	defer r.Close()
+
+	// Read the algo ID from the end of the decoded string, fallback to default hash if not a valid base64 value
+	var hashAlgo api.HashAlgo
+	if decodedHash, err := base64.RawURLEncoding.DecodeString(f.Hash); err == nil && len(decodedHash) > 0 {
+		// Read the algo ID from the end of the decoded string
+		hashAlgo = api.HashAlgo(decodedHash[len(decodedHash)-1])
+	}
+	if err := common.ValidateHashAlgo(hashAlgo); err != nil {
+		objRef := common.InstanceIDToObjectRef(p.Pin.InstanceID)
+		hashAlgo = objRef.HashAlgo
+	}
+	hash := common.MustNewHash(hashAlgo)
+
+	if _, err := io.Copy(hash, r); err != nil {
+		return false, err
+	}
+
+	// Legacy case where the 2 hashes are equal (SHA1 hashes)
+	if common.HexDigest(hash) == f.Hash {
+		return true, nil
+	}
+
+	// Otherwise, generate an InstanceID from the hash
+	if digest := common.ObjectRefToInstanceID(common.ObjectRefFromHash(hash)); f.Hash != digest {
+		logging.Debugf(ctx, "package hash mismatch: expecting %q, got %q", f.Hash, digest)
+		return false, nil
+	}
+	return true, nil
+}
+
 // checkIntegrity verifies the given deployed package is correctly installed and
 // returns a list of files to relink and to redeploy if something is broken.
 //
@@ -1317,13 +1361,21 @@ func (d *deployerImpl) isPresentInGuts(ctx context.Context, instDir string, f pk
 func (d *deployerImpl) checkIntegrity(ctx context.Context, p *DeployedPackage, mode ParanoidMode) (redeploy, relink []string) {
 	logging.Debugf(ctx, "Checking integrity of %q deployment in %q mode...", p.Pin.PackageName, mode)
 
-	// TODO(vadimsh): Understand mode == CheckIntegrity.
-
 	// Examine files that are supposed to be installed.
 	for _, f := range p.Manifest.Files {
 		switch {
 		case d.isPresentInSite(ctx, p.Subdir, f, true): // no need to repair
-			continue
+			if mode != CheckIntegrity {
+				continue
+			}
+			// Always redeploy if the hash is empty (i.e. deployed with older client)
+			if len(f.Hash) != 0 {
+				if match, err := d.checkFileHash(ctx, p, f); err == nil && match {
+					continue
+				}
+			}
+			logging.Debugf(ctx, "integrity mismatch for %q, redeploying", f.Name)
+			redeploy = append(redeploy, f.Name)
 		case f.Symlink == "": // a regular file (not a symlink)
 			switch {
 			case p.InstallMode == pkg.InstallModeCopy:
